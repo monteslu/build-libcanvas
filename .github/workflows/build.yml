@@ -62,10 +62,15 @@ jobs:
           mkdir -p "$LIBDIR"
           echo "INPUT(-lunwind)" > "$LIBDIR/libgcc.a"
           TOOLBIN=${ANDROID_NDK_LATEST_HOME}/toolchains/llvm/prebuilt/linux-x86_64/bin
-          # build.rs links `static=c++`; the NDK keeps libc++.a under an
-          # API-level subdir (.../aarch64-linux-android/24). Put it on the
-          # rustc link search path so -lc++ resolves.
-          SYSLIB=${ANDROID_NDK_LATEST_HOME}/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/aarch64-linux-android/24
+          # build.rs links `static=c++`. The NDK's .../<api>/libc++.a is a
+          # LINKER SCRIPT (INPUT(...)), which rustc's static bundler rejects
+          # ("failed to add native library"). Stage the REAL static archives
+          # as libc++.a / libc++abi.a in a dir we control and search it first.
+          NDKLIB=${ANDROID_NDK_LATEST_HOME}/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/aarch64-linux-android
+          SYSLIB=$RUNNER_TEMP/ndk-cxx
+          mkdir -p "$SYSLIB"
+          cp "$NDKLIB/libc++_static.a" "$SYSLIB/libc++.a"
+          cp "$NDKLIB/libc++abi.a" "$SYSLIB/libc++abi.a"
           {
             echo "CC=$TOOLBIN/aarch64-linux-android24-clang"
             echo "CXX=$TOOLBIN/aarch64-linux-android24-clang++"
