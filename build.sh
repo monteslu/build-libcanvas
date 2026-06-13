@@ -41,10 +41,11 @@ node scripts/build-skia.js
 
 # Rust staticlib. strip=none keeps napi_register_module_v1; lto=false keeps
 # the archive as real ELF objects (fat-LTO bitcode can't be linked by
-# arbitrary downstream toolchains and is invisible to nm).
-cargo build --release \
-    --config 'profile.release.strip="none"' \
-    --config 'profile.release.lto=false'
+# arbitrary downstream toolchains and is invisible to nm). Env vars, not
+# --config: manifest [profile.release] outranks --config, env outranks both.
+CARGO_PROFILE_RELEASE_LTO=false \
+CARGO_PROFILE_RELEASE_STRIP=none \
+cargo build --release
 
 # ── Package ──────────────────────────────────────────────────────────────
 cd ../..
