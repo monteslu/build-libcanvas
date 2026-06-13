@@ -37,7 +37,10 @@ git -C "$SRC/skia" checkout -q "$SKIA_SHA"
 
 # staticlib patch (cdylib -> staticlib)
 git -C "$SRC" checkout -q Cargo.toml
-patch -d "$SRC" -p1 -s < patches/staticlib.patch
+patch -d "$SRC" -p1 -s < "$PWD/patches/staticlib.patch"
+# native-arm64 build.rs (upstream hardcodes a cross-sysroot Docker path)
+git -C "$SRC" checkout -q build.rs
+patch -d "$SRC" -p1 -s < "$PWD/patches/aarch64-native.patch"
 
 # ── Prebuilt Skia archives from upstream's release ───────────────────────
 SHORT=${SKIA_SHA:0:8}

@@ -36,6 +36,16 @@ jobs:
       # cmake probe rejects ("multipass optimization not supported").
       - uses: ilammy/setup-nasm@v1
 
+      # canvas build.rs hardcodes /usr/lib/llvm-19/{lib,include/c++/v1} and
+      # links static libc++/libc++abi — install the matching LLVM 19 toolchain.
+      - name: Install LLVM 19 + static libc++ (linux/android hosts)
+        if: runner.os == 'Linux'
+        run: |
+          wget -q https://apt.llvm.org/llvm.sh
+          chmod +x llvm.sh
+          sudo ./llvm.sh 19
+          sudo apt-get install -y libc++-19-dev libc++abi-19-dev
+
       - name: Setup (android)
         if: matrix.platform == 'android-aarch64'
         run: |
