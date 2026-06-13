@@ -32,6 +32,10 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
+      # libaom (AVIF) needs nasm 2.x — runners ship a too-new 3.x that libaom's
+      # cmake probe rejects ("multipass optimization not supported").
+      - uses: ilammy/setup-nasm@v1
+
       - name: Setup (android)
         if: matrix.platform == 'android-aarch64'
         run: |
