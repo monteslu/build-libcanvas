@@ -74,7 +74,7 @@ if [ "$EXT" = "lib" ]; then
 else
     cp "$SRC/target/$TRIPLE/release/libcanvas.a" "$OUT/"
 fi
-find "$STATIC" -maxdepth 1 -type f -exec cp {} "$OUT/skia/" ;
+find "$STATIC" -maxdepth 1 -type f | xargs -I{} cp {} "$OUT/skia/"
 cp "$SRC/skia-c/skia_c.hpp" "$OUT/include/"
 cp "$SRC/index.js" "$SRC/geometry.js" "$SRC/load-image.js" "$OUT/js/"
 printf "module.exports = process._linkedBinding('canvas');\n" > "$OUT/js/js-binding.js"
