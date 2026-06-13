@@ -13,28 +13,48 @@ jobs:
         include:
           - platform: linux-x86_64
             runner: ubuntu-22.04
-          # TODO(PLAN §15): linux-aarch64 (ubuntu-22.04-arm; build-skia.js needs a
-          # native-arm64 branch), windows-x86_64, macos-x86_64, macos-aarch64,
-          # android-aarch64 — expand once linux-x86_64 is green.
+          - platform: linux-aarch64
+            runner: ubuntu-22.04-arm
+          - platform: android-aarch64
+            runner: ubuntu-22.04
+          - platform: macos-x86_64
+            runner: macos-13
+          - platform: macos-aarch64
+            runner: macos-14
+          - platform: windows-x86_64
+            runner: windows-2022
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
-
-      - name: Install LLVM 19 + deps
-        run: |
-          wget -q https://apt.llvm.org/llvm.sh
-          chmod +x llvm.sh
-          sudo ./llvm.sh 19
-          sudo apt-get install -y libc++-19-dev libc++abi-19-dev ninja-build nasm
-          sudo ln -sf /usr/bin/clang-19 /usr/local/bin/clang
-          sudo ln -sf /usr/bin/clang++-19 /usr/local/bin/clang++
 
       - uses: actions/setup-node@v4
         with: { node-version: 22 }
 
       - uses: dtolnay/rust-toolchain@stable
 
+      - name: Setup (android)
+        if: matrix.platform == 'android-aarch64'
+        run: |
+          # upstream's NDK libgcc/unwind shim (their CI does the same)
+          CLANG_VERSION=$(ls ${ANDROID_NDK_LATEST_HOME}/toolchains/llvm/prebuilt/linux-x86_64/lib/clang | sed 's/ *$//g')
+          LIBDIR=${ANDROID_NDK_LATEST_HOME}/toolchains/llvm/prebuilt/linux-x86_64/lib/clang/${CLANG_VERSION}/lib/linux/aarch64
+          mkdir -p "$LIBDIR"
+          echo "INPUT(-lunwind)" > "$LIBDIR/libgcc.a"
+          TOOLBIN=${ANDROID_NDK_LATEST_HOME}/toolchains/llvm/prebuilt/linux-x86_64/bin
+          {
+            echo "CC=$TOOLBIN/aarch64-linux-android24-clang"
+            echo "CXX=$TOOLBIN/aarch64-linux-android24-clang++"
+            echo "AR=$TOOLBIN/llvm-ar"
+            echo "CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=$TOOLBIN/aarch64-linux-android24-clang"
+            echo "LDFLAGS=-fuse-ld=lld"
+          } >> "$GITHUB_ENV"
+
+      - name: Setup (macos)
+        if: startsWith(matrix.platform, 'macos')
+        run: echo "MACOSX_DEPLOYMENT_TARGET=11.0" >> "$GITHUB_ENV"
+
       - name: Build
+        shell: bash
         run: PLATFORM=${{ matrix.platform }} ./build.sh
 
       - uses: actions/upload-artifact@v4
