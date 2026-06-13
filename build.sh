@@ -59,8 +59,9 @@ cp "$SRC/index.js" "$SRC/geometry.js" "$SRC/load-image.js" "$OUT/js/"
 printf "module.exports = process._linkedBinding('canvas');\n" > "$OUT/js/js-binding.js"
 echo "$CANVAS_VERSION" > "$OUT/CANVAS_VERSION"
 
-nm "$OUT/libcanvas.a" 2>/dev/null | grep -q 'T napi_register_module_v1' \
-    || { echo "FATAL: napi_register_module_v1 missing from libcanvas.a"; exit 1; }
+# note: no `grep -q` here — early-exit SIGPIPEs nm and pipefail reports failure
+SYMS=$(nm "$OUT/libcanvas.a" 2>/dev/null | grep -c 'T napi_register_module_v1' || true)
+[ "$SYMS" -ge 1 ] || { echo "FATAL: napi_register_module_v1 missing from libcanvas.a"; exit 1; }
 
 tar czf "out/libcanvas-$PLATFORM.tar.gz" -C "$OUT" .
 ls -lh "out/libcanvas-$PLATFORM.tar.gz"
