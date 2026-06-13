@@ -39,8 +39,12 @@ cd "$SRC"
 # Skia static build (their script; host-native = no --target flag)
 node scripts/build-skia.js
 
-# Rust staticlib (keep symbols — napi_register_module_v1 must survive)
-cargo build --release --config 'profile.release.strip="none"'
+# Rust staticlib. strip=none keeps napi_register_module_v1; lto=false keeps
+# the archive as real ELF objects (fat-LTO bitcode can't be linked by
+# arbitrary downstream toolchains and is invisible to nm).
+cargo build --release \
+    --config 'profile.release.strip="none"' \
+    --config 'profile.release.lto=false'
 
 # ── Package ──────────────────────────────────────────────────────────────
 cd ../..
