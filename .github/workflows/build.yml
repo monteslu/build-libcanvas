@@ -5,11 +5,6 @@ on:
     tags: ['v*']
   workflow_dispatch:
 
-# Force JS actions onto Node.js 24 now (runner default is node20 until
-# 2026-06-16). Clears the "Node.js 20 actions are deprecated" warnings.
-env:
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
-
 jobs:
   build:
     strategy:
@@ -30,17 +25,25 @@ jobs:
             runner: windows-2022
     runs-on: ${{ matrix.runner }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
 
-      - uses: actions/setup-node@v5
+      - uses: actions/setup-node@v6
         with: { node-version: 22 }
 
       - uses: actions-rust-lang/setup-rust-toolchain@v1
 
-      # libaom (AVIF) needs a pinned nasm 2.x — keep ilammy/setup-nasm (it
-      # installs the right version; the lone node20 deprecation it emits is not
-      # worth risking package-manager nasm 3.x, which libaom's probe rejects).
-      - uses: ilammy/setup-nasm@v1
+      # libaom (AVIF) needs nasm. ilammy/setup-nasm is node20-only (no node24
+      # release), so install nasm directly per-OS. ubuntu-22.04 apt ships nasm
+      # 2.15 (libaom-safe); macOS brew + Windows choco supply current builds.
+      - name: Install nasm
+        shell: bash
+        run: |
+          case "$RUNNER_OS" in
+            Linux)   sudo apt-get update && sudo apt-get install -y nasm ;;
+            macOS)   brew list nasm >/dev/null 2>&1 || brew install nasm ;;
+            Windows) choco install nasm -y && echo "C:\\Program Files\\NASM" >> "$GITHUB_PATH" ;;
+          esac
+          nasm --version || true
 
       # canvas build.rs hardcodes /usr/lib/llvm-19/{lib,include/c++/v1} and
       # links static libc++/libc++abi — install the matching LLVM 19 toolchain.
@@ -92,7 +95,7 @@ jobs:
         shell: bash
         run: PLATFORM=${{ matrix.platform }} ./build.sh
 
-      - uses: actions/upload-artifact@v5
+      - uses: actions/upload-artifact@v7
         with:
           name: libcanvas-${{ matrix.platform }}
           path: out/libcanvas-${{ matrix.platform }}.tar.gz
@@ -104,8 +107,8 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@v5
+      - uses: actions/download-artifact@v8
         with: { merge-multiple: true }
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@v3
         with:
           files: libcanvas-*.tar.gz
