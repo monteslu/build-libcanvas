@@ -47,6 +47,11 @@ jobs:
           chmod +x llvm.sh
           sudo ./llvm.sh 19
           sudo apt-get install -y libc++-19-dev libc++abi-19-dev
+          # canvas build.rs feeds clang the llvm-19 libc++ headers; the compiler
+          # MUST be clang-19 too (default clang is older and can't parse them).
+          # Android sets its own NDK CC/CXX afterward, overriding these.
+          echo "CC=clang-19" >> "$GITHUB_ENV"
+          echo "CXX=clang++-19" >> "$GITHUB_ENV"
 
       - name: Setup (android)
         if: matrix.platform == 'android-aarch64'
