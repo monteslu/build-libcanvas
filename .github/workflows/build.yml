@@ -1,0 +1,56 @@
+name: Build libcanvas
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux-x86_64
+            runner: ubuntu-22.04
+          # TODO(PLAN §15): linux-aarch64 (ubuntu-22.04-arm; build-skia.js needs a
+          # native-arm64 branch), windows-x86_64, macos-x86_64, macos-aarch64,
+          # android-aarch64 — expand once linux-x86_64 is green.
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install LLVM 19 + deps
+        run: |
+          wget -q https://apt.llvm.org/llvm.sh
+          chmod +x llvm.sh
+          sudo ./llvm.sh 19
+          sudo apt-get install -y libc++-19-dev libc++abi-19-dev ninja-build nasm
+          sudo ln -sf /usr/bin/clang-19 /usr/local/bin/clang
+          sudo ln -sf /usr/bin/clang++-19 /usr/local/bin/clang++
+
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Build
+        run: PLATFORM=${{ matrix.platform }} ./build.sh
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: libcanvas-${{ matrix.platform }}
+          path: out/libcanvas-${{ matrix.platform }}.tar.gz
+
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with: { merge-multiple: true }
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: libcanvas-*.tar.gz

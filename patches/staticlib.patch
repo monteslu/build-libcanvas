@@ -1,0 +1,13 @@
+diff --git a/Cargo.toml b/Cargo.toml
+index a7beacf..73b22a6 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -6,7 +6,7 @@ resolver = "3"
+ version  = "0.1.0"
+ 
+ [lib]
+-crate-type = ["cdylib"]
++crate-type = ["staticlib"]
+ 
+ [dependencies]
+ anyhow          = "1"
