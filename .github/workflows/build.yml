@@ -25,15 +25,16 @@ jobs:
             runner: windows-2022
     runs-on: ${{ matrix.runner }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with: { node-version: 22 }
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
 
-      # libaom (AVIF) needs nasm 2.x — runners ship a too-new 3.x that libaom's
-      # cmake probe rejects ("multipass optimization not supported").
+      # libaom (AVIF) needs a pinned nasm 2.x — keep ilammy/setup-nasm (it
+      # installs the right version; the lone node20 deprecation it emits is not
+      # worth risking package-manager nasm 3.x, which libaom's probe rejects).
       - uses: ilammy/setup-nasm@v1
 
       # canvas build.rs hardcodes /usr/lib/llvm-19/{lib,include/c++/v1} and
@@ -86,7 +87,7 @@ jobs:
         shell: bash
         run: PLATFORM=${{ matrix.platform }} ./build.sh
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         with:
           name: libcanvas-${{ matrix.platform }}
           path: out/libcanvas-${{ matrix.platform }}.tar.gz
@@ -98,7 +99,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v5
         with: { merge-multiple: true }
       - uses: softprops/action-gh-release@v2
         with:
