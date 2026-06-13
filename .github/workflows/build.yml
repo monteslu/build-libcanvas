@@ -5,6 +5,11 @@ on:
     tags: ['v*']
   workflow_dispatch:
 
+# Force JS actions onto Node.js 24 now (runner default is node20 until
+# 2026-06-16). Clears the "Node.js 20 actions are deprecated" warnings.
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
+
 jobs:
   build:
     strategy:
