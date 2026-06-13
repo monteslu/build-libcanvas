@@ -17,10 +17,8 @@ jobs:
             runner: ubuntu-22.04-arm
           - platform: android-aarch64
             runner: ubuntu-22.04
-          # macos-x86_64 temporarily out: free-tier macos-13 Intel runners queue
-          # for hours and block the run. Re-add once the other 5 are published.
-          # - platform: macos-x86_64
-          #   runner: macos-13
+          - platform: macos-x86_64
+            runner: macos-13
           - platform: macos-aarch64
             runner: macos-14
           - platform: windows-x86_64
