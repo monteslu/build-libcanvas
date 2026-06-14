@@ -1,11 +1,22 @@
 # build-libcanvas
 
 Pre-built static libraries of [@napi-rs/canvas](https://github.com/Brooooooklyn/canvas)
-(Skia CPU rasterizer + Rust N-API layer) for embedding via `node::AddLinkedBinding`.
+(Skia + Rust N-API layer) for embedding via `node::AddLinkedBinding`.
 Used by [jsgame-libretro](https://github.com/monteslu/jsgame-libretro).
 
 Same model as build-libnode: build once per platform in CI, downstream fetches
 binaries from GitHub Releases.
+
+**Skia is built FROM SOURCE with the Ganesh GL backend** (`skia_use_gl=true`),
+not the upstream CPU-only prebuilts — jsgame's 3D-composite path uses GPU-backed
+Skia surfaces (`SkSurfaces::RenderTarget`) so `drawImage(webglCanvas)` + HUD
+composite GPU-to-GPU with no readback. The GPU surface C/Rust API is added by
+`patches/ganesh-gpu.patch`. The CPU raster path is unchanged (GPU is additive,
+gated on a `GrDirectContext` being supplied).
+
+Skia's GL dialect (`skia_gl_standard`) is chosen per platform in `build.sh`:
+`gles` for Android (real GLES3), `gl` for desktop GL-core (linux/macos/windows).
+A mismatch makes Ganesh shader-draws silently no-op at runtime.
 
 ## What's in each archive
 

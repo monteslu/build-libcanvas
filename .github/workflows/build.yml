@@ -45,6 +45,21 @@ jobs:
           esac
           nasm --version || true
 
+      # Skia is now built FROM SOURCE with the Ganesh GL backend (upstream's
+      # prebuilt skia-<sha> archives are CPU-only). That needs ninja (gn is
+      # fetched by build.sh via skia/bin/fetch-gn) and a python3 for the Skia
+      # build tooling (git-sync-deps / gn). git-sync-deps skips the emsdk hook
+      # (GIT_SYNC_DEPS_SKIP_EMSDK, set in build.sh).
+      - name: Install Skia build tools (ninja)
+        shell: bash
+        run: |
+          case "$RUNNER_OS" in
+            Linux)   sudo apt-get install -y ninja-build python3 ;;
+            macOS)   brew list ninja >/dev/null 2>&1 || brew install ninja ;;
+            Windows) choco install ninja -y ;;
+          esac
+          ninja --version || true
+
       # canvas build.rs hardcodes /usr/lib/llvm-19/{lib,include/c++/v1} and
       # links static libc++/libc++abi — install the matching LLVM 19 toolchain.
       - name: Install LLVM 19 + static libc++ (linux/android hosts)

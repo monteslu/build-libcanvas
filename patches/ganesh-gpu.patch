@@ -1,0 +1,564 @@
+diff --git a/build.rs b/build.rs
+index 09a2c3c..40c0551 100644
+--- a/build.rs
++++ b/build.rs
+@@ -42,6 +42,15 @@ fn main() {
+ 
+   build.cpp(true).file("skia-c/skia_c.cpp");
+ 
++  // GPU (Ganesh GL) compile path. SK_GANESH is NOT auto-defined by Skia's public
++  // headers (SkTypes.h gates SK_GL on it), so skia_c.cpp's GPU code only compiles
++  // when we define it here. Opt in via env (build-libcanvas sets it together with
++  // a Ganesh-enabled libskia.a). Off by default -> the CPU-only stub path.
++  if env::var("CANVAS_SKIA_GANESH").as_deref() == Ok("1") {
++    println!("cargo:rerun-if-env-changed=CANVAS_SKIA_GANESH");
++    build.define("SK_GANESH", None).define("SK_GL", None);
++  }
++
+   if compile_target.as_str() == "aarch64-linux-android" {
+     let nkd_home = env::var("ANDROID_NDK_LATEST_HOME").unwrap();
+     let host = if cfg!(target_os = "windows") {
+diff --git a/scripts/build-skia.js b/scripts/build-skia.js
+index 9ceeed3..5800a4f 100644
+--- a/scripts/build-skia.js
++++ b/scripts/build-skia.js
+@@ -80,7 +80,11 @@ const GN_ARGS = [
+   `paragraph_tests_enabled=false`,
+   `skia_enable_android_utils=false`,
+   `skia_enable_discrete_gpu=false`,
+-  `skia_enable_ganesh=false`,
++  // Ganesh GL backend ON: GPU-backed surfaces (SkSurfaces::RenderTarget) for the
++  // jsgame 3D-composite path (drawImage(webglCanvas) GPU->GPU, no readback). The
++  // CPU raster surface (SkSurfaces::Raster) is unaffected; GPU is additive and
++  // only used when a GrDirectContext is supplied.
++  `skia_enable_ganesh=true`,
+   `skia_enable_pdf=true`,
+   `skia_enable_skottie=true`,
+   `skia_enable_skshaper=true`,
+@@ -91,7 +95,12 @@ const GN_ARGS = [
+   `skia_pdf_subset_harfbuzz=${PDF_HARFBUZZ_SUBSET_ENABLED}`,
+   `skia_use_expat=true`,
+   `skia_use_system_expat=false`,
+-  `skia_use_gl=false`,
++  `skia_use_gl=true`,
++  `skia_use_webgl=false`,
++  // GL dialect: "gles" for Android (real GLES3) — the SHIP target. For the LOCAL
++  // desktop-GL-core flatpak test box, set CANVAS_SKIA_GL_STANDARD=gl so Ganesh
++  // emits desktop-GL shaders (else shader-based draws silently no-op on desktop).
++  `skia_gl_standard="${process.env.CANVAS_SKIA_GL_STANDARD || 'gles'}"`,
+   `skia_use_harfbuzz=true`,
+   `skia_use_icu=true`,
+   // the libavif would conflict with the Rust libavif, use the Rust library to handle avif images
+diff --git a/skia-c/skia_c.cpp b/skia-c/skia_c.cpp
+index bfaa2d6..808de8c 100644
+--- a/skia-c/skia_c.cpp
++++ b/skia-c/skia_c.cpp
+@@ -12,6 +12,26 @@
+ #endif
+ 
+ #include "skia_c.hpp"
++
++// GPU (Ganesh GL). SK_GANESH is defined by Skia when built with a GPU backend
++// (skia_enable_ganesh=true). When absent (CPU-only Skia), the skiac_grcontext_*
++// / skiac_surface_create_gpu entry points are stubbed to return null/no-op so
++// the host falls back to the CPU raster + readback present path.
++#if defined(SK_GANESH)
++#include <include/gpu/GpuTypes.h>
++#include <include/gpu/ganesh/GrBackendSurface.h>
++#include <include/gpu/ganesh/GrContextOptions.h>
++#include <include/gpu/ganesh/GrDirectContext.h>
++#include <include/gpu/ganesh/SkImageGanesh.h>
++#include <include/gpu/ganesh/SkSurfaceGanesh.h>
++#include <include/gpu/ganesh/gl/GrGLAssembleInterface.h>
++#include <include/gpu/ganesh/gl/GrGLBackendSurface.h>
++#include <include/gpu/ganesh/gl/GrGLDirectContext.h>
++#include <include/gpu/ganesh/gl/GrGLInterface.h>
++#include <include/gpu/ganesh/gl/GrGLTypes.h>
++#define GRCONTEXT_CAST reinterpret_cast<GrDirectContext*>(gr)
++#endif
++
+ #define SURFACE_CAST reinterpret_cast<SkSurface*>(c_surface)
+ #define CANVAS_CAST reinterpret_cast<SkCanvas*>(c_canvas)
+ #define PAINT_CAST reinterpret_cast<SkPaint*>(c_paint)
+@@ -334,6 +354,113 @@ void skiac_surface_get_bitmap(skiac_surface* c_surface,
+   info->height = (size_t)SURFACE_CAST->height();
+ }
+ 
++// ── GPU (Ganesh GL) ─────────────────────────────────────────────────────────
++#if defined(SK_GANESH)
++// Host loader signature. The frontend's get_proc_address (RetroArch's
++// retro_hw_get_proc_address_t) is `void*(*)(const char* sym)` — a SINGLE arg.
++// Skia's GrGLGetProc is two-arg `(void* ctx, const char* name)`; the trampoline
++// below bridges them (passes the host loader as Skia's ctx, drops the ctx when
++// calling). Mismatching the arity (calling a 1-arg fn as 2-arg) is UB and
++// hangs/crashes, so this typedef MUST match the frontend exactly.
++using HostGetProc = void* (*)(const char*);
++
++skiac_grcontext* skiac_grcontext_make_gl(void* get_proc, void* ctx) {
++  // GrGLMakeAssembledInterface(ctx, getProc) calls getProc(ctx, name) for each
++  // GL entry point. We pass the host loader pointer as Skia's `ctx` and use a
++  // stateless trampoline that forwards to it. (void* ctx) userdata is unused —
++  // the loader is ctx-less; if a host needs userdata, fold it into get_proc.
++  (void)ctx;
++  // Prefer the platform NATIVE interface: it loads GL entry points directly from
++  // the current context's driver, so the full draw pipeline (not just clear) is
++  // wired. The assembled-from-proc-address interface (RA's get_proc_address) was
++  // missing entry points the draw pipeline needs -> draws silently no-op'd while
++  // clear() worked. Fall back to assembled only if native is unavailable.
++  sk_sp<const GrGLInterface> iface = GrGLMakeNativeInterface();
++  if (!iface && get_proc) {
++    iface = GrGLMakeAssembledInterface(
++        get_proc, [](void* c, const char* name) -> GrGLFuncPtr {
++          return reinterpret_cast<GrGLFuncPtr>(
++              reinterpret_cast<HostGetProc>(c)(name));
++        });
++  }
++  if (!iface) return nullptr;
++  GrContextOptions opts;
++  sk_sp<GrDirectContext> dctx = GrDirectContexts::MakeGL(iface, opts);
++  if (!dctx) return nullptr;
++  return reinterpret_cast<skiac_grcontext*>(dctx.release());
++}
++
++void skiac_grcontext_destroy(skiac_grcontext* gr) {
++  if (!gr) return;
++  GRCONTEXT_CAST->unref();
++}
++
++void skiac_grcontext_reset(skiac_grcontext* gr) {
++  if (!gr) return;
++  // Skia's GL state cache is stale after the frontend issued its own GL calls.
++  GRCONTEXT_CAST->resetContext();
++}
++
++void skiac_grcontext_flush(skiac_grcontext* gr, skiac_surface* c_surface) {
++  if (!gr) return;
++  if (c_surface) {
++    GRCONTEXT_CAST->flush(SURFACE_CAST);
++  }
++  GRCONTEXT_CAST->submit();
++}
++
++skiac_surface* skiac_surface_create_gpu(skiac_grcontext* gr,
++                                        int width,
++                                        int height,
++                                        uint8_t cs) {
++  if (!gr) return nullptr;
++  SkGraphics::Init();
++  auto color_space = COLOR_SPACE_CAST;
++  auto info = SkImageInfo::Make(width, height, kRGBA_8888_SkColorType,
++                                kPremul_SkAlphaType, color_space);
++  // Top-left origin to match the CPU raster surface's pixel layout, so the
++  // host's existing flip logic and HUD coordinates are unchanged.
++  sk_sp<SkSurface> surface = SkSurfaces::RenderTarget(
++      GRCONTEXT_CAST, skgpu::Budgeted::kYes, info, 0,
++      kTopLeft_GrSurfaceOrigin, nullptr);
++  if (!surface) return nullptr;
++  return reinterpret_cast<skiac_surface*>(surface.release());
++}
++
++unsigned skiac_surface_gpu_texture_id(skiac_surface* c_surface) {
++  if (!c_surface) return 0;
++  GrBackendTexture tex = SkSurfaces::GetBackendTexture(
++      SURFACE_CAST, SkSurfaces::BackendHandleAccess::kFlushRead);
++  if (!tex.isValid()) return 0;
++  GrGLTextureInfo glInfo;
++  if (!GrBackendTextures::GetGLTextureInfo(tex, &glInfo)) return 0;
++  return glInfo.fID;
++}
++
++// Clear the GPU surface to fully transparent. Used for the HUD overlay surface:
++// the game's fillText/fillRect draws into it (transparent elsewhere), and the
++// host alpha-blends it over the separately-presented 3D scene at present time.
++void skiac_surface_gpu_clear_transparent(skiac_grcontext* gr,
++                                         skiac_surface* c_surface) {
++  if (!c_surface) return;
++  // DEBUG: JSGAME_GPU_HUDTINT -> clear to semi-transparent blue to verify the
++  // HUD surface reaches the screen via the blend (isolates surface/blend from
++  // fillText). Normal: fully transparent.
++  SURFACE_CAST->getCanvas()->clear(SK_ColorTRANSPARENT);
++}
++
++#else  // !SK_GANESH — CPU-only Skia: stub the GPU API so the host falls back.
++skiac_grcontext* skiac_grcontext_make_gl(void*, void*) { return nullptr; }
++void skiac_grcontext_destroy(skiac_grcontext*) {}
++void skiac_grcontext_reset(skiac_grcontext*) {}
++void skiac_grcontext_flush(skiac_grcontext*, skiac_surface*) {}
++skiac_surface* skiac_surface_create_gpu(skiac_grcontext*, int, int, uint8_t) {
++  return nullptr;
++}
++unsigned skiac_surface_gpu_texture_id(skiac_surface*) { return 0; }
++void skiac_surface_gpu_clear_transparent(skiac_grcontext*, skiac_surface*) {}
++#endif  // SK_GANESH
++
+ // Canvas
+ 
+ void skiac_canvas_clear(skiac_canvas* c_canvas, uint32_t color) {
+diff --git a/skia-c/skia_c.hpp b/skia-c/skia_c.hpp
+index 7079519..93e7489 100644
+--- a/skia-c/skia_c.hpp
++++ b/skia-c/skia_c.hpp
+@@ -90,6 +90,11 @@ typedef struct skiac_drawable skiac_drawable;
+ typedef struct skiac_encoder skiac_encoder;
+ typedef struct skiac_document skiac_document;
+ typedef struct skiac_skottie_animation skiac_skottie_animation;
++// GPU (Ganesh GL) — only present when Skia is built with skia_use_gl=true.
++// Used by jsgame-libretro for the 3D-composite path (drawImage(webglCanvas)
++// GPU->GPU, no readback). A null grcontext means the host should fall back to
++// the CPU raster surface + readback present.
++typedef struct skiac_grcontext skiac_grcontext;
+ 
+ #if defined(WIN32) || defined(_WIN32) || defined(__WIN32__) || defined(__NT__)
+ #define SK_FONT_FILE_PREFIX "C:/Windows/Fonts"
+@@ -797,6 +802,36 @@ bool skiac_surface_save(skiac_surface* c_surface, const char* path);
+ void skiac_surface_get_bitmap(skiac_surface* c_surface,
+                               skiac_bitmap_info* info);
+ 
++// ── GPU (Ganesh GL) ────────────────────────────────────────────────────────
++// Build a GrDirectContext from an already-current GL context. get_proc is a
++// GrGLGetProc-style loader (void*(*)(void* ctx, const char* name)); ctx is its
++// userdata (may be null). Returns null if Skia was built without GL support or
++// context creation fails. Cache the result; do not call per frame.
++skiac_grcontext* skiac_grcontext_make_gl(void* get_proc, void* ctx);
++void skiac_grcontext_destroy(skiac_grcontext* gr);
++// Skia must re-sync its cached GL state after the frontend (RetroArch / Three.js)
++// issues its own GL calls and clobbers it. Call once at the top of each frame
++// before drawing into a GPU surface.
++void skiac_grcontext_reset(skiac_grcontext* gr);
++// Flush + submit all queued GPU work for the surface (call after the frame's
++// draws, before reading the texture / presenting).
++void skiac_grcontext_flush(skiac_grcontext* gr, skiac_surface* c_surface);
++// GPU-backed surface (SkSurfaces::RenderTarget). RGBA premultiplied, top-left
++// origin so it matches the CPU raster surface's pixel layout.
++skiac_surface* skiac_surface_create_gpu(skiac_grcontext* gr,
++                                        int width,
++                                        int height,
++                                        uint8_t cs);
++// The GL texture id backing a GPU surface (0 if not GPU-backed). Lets the host
++// present the surface as a textured quad into the frontend FBO — a GPU->GPU
++// blit, no CPU readback.
++unsigned skiac_surface_gpu_texture_id(skiac_surface* c_surface);
++// Clear a GPU surface to fully transparent — for the HUD overlay surface (the
++// game's fillText/fillRect draws into it; the host alpha-blends it over the 3D
++// scene at present). gr is unused but kept for signature symmetry.
++void skiac_surface_gpu_clear_transparent(skiac_grcontext* gr,
++                                         skiac_surface* c_surface);
++
+ // Canvas
+ void skiac_canvas_clear(skiac_canvas* c_canvas, uint32_t color);
+ void skiac_canvas_set_transform(skiac_canvas* c_canvas, skiac_matrix* c_matrix);
+diff --git a/src/ctx.rs b/src/ctx.rs
+index f6b480d..8d1a30e 100644
+--- a/src/ctx.rs
++++ b/src/ctx.rs
+@@ -32,8 +32,8 @@ use crate::{
+   path::Path,
+   pattern::{CanvasPattern, Pattern},
+   sk::{
+-    AlphaType, Bitmap, BlendMode, ColorSpace, FillType, FontVariantCaps, ImageFilter, LineMetrics,
+-    MaskFilter, Matrix, Paint, PaintStyle, Path as SkPath, PathEffect, PathOp,
++    AlphaType, Bitmap, BlendMode, ColorSpace, FillType, FontVariantCaps, GrContext, ImageFilter,
++    LineMetrics, MaskFilter, Matrix, Paint, PaintStyle, Path as SkPath, PathEffect, PathOp,
+     SkEncodedImageFormat, SkWMemoryStream, SkiaDataRef, Surface, SurfaceRef, Transform,
+   },
+   state::Context2dRenderingState,
+@@ -42,6 +42,41 @@ use crate::{
+ static CSS_SIZE_REGEXP: LazyLock<Regex> =
+   LazyLock::new(|| Regex::new(r#"(-?[\d\.]+)(%|px|pt|pc|in|cm|mm|%|em|ex|ch|rem|q)?\s*"#).unwrap());
+ 
++// Process GPU (Ganesh GL) direct context. Single-threaded use (the host's
++// libretro thread is the only one that touches GL), so a thread-local is safe
++// and avoids Send/Sync bounds on the non-thread-safe GrDirectContext. Lazily
++// created from the frontend's GL proc-address; null on CPU-only Skia.
++thread_local! {
++  static GR_CONTEXT: RefCell<Option<GrContext>> = const { RefCell::new(None) };
++}
++
++/// Init (idempotent) the process GrContext from a GL proc-address loader. The
++/// current thread's GL context must be current. Returns true on success.
++pub(crate) fn gpu_init(get_proc: *mut std::ffi::c_void) -> bool {
++  GR_CONTEXT.with(|c| {
++    let mut slot = c.borrow_mut();
++    if slot.is_some() {
++      return true;
++    }
++    if let Some(gr) = GrContext::make_gl(get_proc) {
++      *slot = Some(gr);
++      true
++    } else {
++      false
++    }
++  })
++}
++
++/// Whether the process GrContext is live (GPU mode available).
++pub(crate) fn gpu_ready() -> bool {
++  GR_CONTEXT.with(|c| c.borrow().is_some())
++}
++
++/// Run a closure with the process GrContext, if any.
++pub(crate) fn with_gr<R>(f: impl FnOnce(&GrContext) -> R) -> Option<R> {
++  GR_CONTEXT.with(|c| c.borrow().as_ref().map(f))
++}
++
+ impl From<SkError> for Error {
+   fn from(err: SkError) -> Error {
+     Error::new(Status::InvalidArg, format!("{err}"))
+@@ -111,6 +146,64 @@ impl Context {
+     })
+   }
+ 
++  /// GPU-backed (Ganesh GL) Context, using the process GrContext. Returns None
++  /// if GPU mode isn't available (CPU-only Skia, or no GrContext yet). Direct
++  /// rendering (no page_recorder) so the WebGL blit + HUD draws accumulate in
++  /// the GPU surface and are presented as a GL texture (no readback).
++  pub fn new_gpu(width: u32, height: u32, color_space: ColorSpace) -> Option<Self> {
++    let surface = with_gr(|gr| Surface::new_gpu(gr, width, height, color_space))??;
++    Some(Context {
++      surface,
++      page_recorder: None,
++      alpha: true,
++      path: SkPath::new(),
++      states: vec![],
++      state: Context2dRenderingState::default(),
++      width,
++      height,
++      color_space,
++      stream: None,
++    })
++  }
++
++  /// Swap this Context's surface for a GPU-backed one (same size/color space),
++  /// switching to direct rendering. Returns true if it became GPU-backed.
++  /// No-op + false if GPU mode isn't available (caller keeps the CPU surface).
++  pub fn upgrade_to_gpu(&mut self) -> bool {
++    if self.page_recorder.is_none() && self.is_gpu() {
++      return true; // already GPU
++    }
++    match Self::new_gpu(self.width, self.height, self.color_space) {
++      Some(gpu) => {
++        self.surface = gpu.surface;
++        self.page_recorder = None;
++        true
++      }
++      None => false,
++    }
++  }
++
++  /// True if this Context renders into a GPU surface.
++  pub fn is_gpu(&self) -> bool {
++    self.surface.gpu_texture_id() != 0
++  }
++
++  /// Flush+submit GPU work for this surface (call before present).
++  pub fn gpu_flush(&self) {
++    with_gr(|gr| gr.flush(&self.surface));
++  }
++
++  /// The GL texture id backing this surface (0 if CPU). For the host present.
++  pub fn gpu_texture_id(&self) -> u32 {
++    self.surface.gpu_texture_id()
++  }
++
++  /// Clear the GPU surface to transparent — for the HUD overlay (only the
++  /// game's fillText/fillRect remain, blended over the 3D scene at present).
++  pub fn gpu_clear_transparent(&mut self) {
++    with_gr(|gr| gr.clear_transparent(&self.surface));
++  }
++
+   // Create a Context from an existing Surface (e.g., from PDFDocument)
+   pub(crate) fn new_from_surface(surface: Surface, width: u32, height: u32) -> Self {
+     Context {
+diff --git a/src/lib.rs b/src/lib.rs
+index 57ecd27..82ac02f 100644
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -215,6 +215,63 @@ impl<'c> CanvasElement<'c> {
+     this.get_named_property("ctx")
+   }
+ 
++  // ── GPU (Ganesh GL) — jsgame 3D-composite path ────────────────────────────
++  /// Initialize the process GrContext from a GL proc-address. The pointer is
++  /// passed as a decimal string (JS numbers can't hold a full 64-bit pointer and
++  /// the napi5 feature set has no BigInt). Idempotent. Returns true on success.
++  #[napi]
++  pub fn jsg_gpu_init(&self, get_proc_ptr: String) -> bool {
++    let ptr: u64 = get_proc_ptr.parse().unwrap_or(0);
++    if ptr == 0 {
++      return false;
++    }
++    crate::ctx::gpu_init(ptr as *mut std::ffi::c_void)
++  }
++
++  /// True if GPU mode (Ganesh) is available on this process.
++  #[napi]
++  pub fn jsg_gpu_ready(&self) -> bool {
++    crate::ctx::gpu_ready()
++  }
++
++  /// Upgrade this canvas's 2D context to a GPU-backed surface. Returns true if
++  /// it's now GPU-backed (false → caller keeps the CPU surface + readback path).
++  #[napi]
++  pub fn jsg_upgrade_to_gpu(&mut self) -> bool {
++    self.ctx.context.upgrade_to_gpu()
++  }
++
++  /// Re-sync Skia's cached GL state after the frontend (RetroArch / Three.js)
++  /// issued its own GL calls. Call once per frame before drawing into the GPU
++  /// surface, else Skia draws against stale GL state (wrong/blank output).
++  #[napi]
++  pub fn jsg_gpu_reset(&self) {
++    crate::ctx::with_gr(|gr| gr.reset());
++  }
++
++  /// The GL texture id backing this canvas's GPU surface (0 if CPU). Lets the
++  /// host blit the WebGL scene straight into it (GPU->GPU) before the HUD draws.
++  #[napi]
++  pub fn jsg_gpu_texture_id(&self) -> u32 {
++    self.ctx.context.gpu_texture_id()
++  }
++
++  /// Clear this canvas's GPU surface to transparent (HUD overlay prep). The
++  /// subsequent fillText/fillRect draws form a transparent HUD layer the host
++  /// blends over the 3D scene at present.
++  #[napi]
++  pub fn jsg_gpu_clear_transparent(&mut self) {
++    self.ctx.context.gpu_clear_transparent();
++  }
++
++  /// Flush+submit GPU work; returns the backing GL texture id for the host to
++  /// present (0 if not GPU-backed).
++  #[napi]
++  pub fn jsg_gpu_flush(&mut self) -> u32 {
++    self.ctx.context.gpu_flush();
++    self.ctx.context.gpu_texture_id()
++  }
++
+   #[napi]
+   pub fn encode(
+     &mut self,
+diff --git a/src/sk.rs b/src/sk.rs
+index 11b1a9b..e4b480d 100644
+--- a/src/sk.rs
++++ b/src/sk.rs
+@@ -26,6 +26,13 @@ pub mod ffi {
+     _unused: [u8; 0],
+   }
+ 
++  // GPU (Ganesh GL) direct context — opaque. Null when Skia is CPU-only.
++  #[repr(C)]
++  #[derive(Copy, Clone, Debug)]
++  pub struct skiac_grcontext {
++    _unused: [u8; 0],
++  }
++
+   #[repr(C)]
+   #[derive(Copy, Clone, Debug)]
+   pub struct skiac_w_memory_stream {
+@@ -418,6 +425,23 @@ pub mod ffi {
+ 
+     pub fn skiac_surface_create_rgba(width: i32, height: i32, cs: u8) -> *mut skiac_surface;
+ 
++    // ── GPU (Ganesh GL) ─────────────────────────────────────────────────────
++    pub fn skiac_grcontext_make_gl(
++      get_proc: *mut c_void,
++      ctx: *mut c_void,
++    ) -> *mut skiac_grcontext;
++    pub fn skiac_grcontext_destroy(gr: *mut skiac_grcontext);
++    pub fn skiac_grcontext_reset(gr: *mut skiac_grcontext);
++    pub fn skiac_grcontext_flush(gr: *mut skiac_grcontext, c_surface: *mut skiac_surface);
++    pub fn skiac_surface_gpu_clear_transparent(gr: *mut skiac_grcontext, c_surface: *mut skiac_surface);
++    pub fn skiac_surface_create_gpu(
++      gr: *mut skiac_grcontext,
++      width: i32,
++      height: i32,
++      cs: u8,
++    ) -> *mut skiac_surface;
++    pub fn skiac_surface_gpu_texture_id(c_surface: *mut skiac_surface) -> u32;
++
+     pub fn skiac_surface_destroy(surface: *mut skiac_surface);
+ 
+     pub fn skiac_surface_copy_rgba(
+@@ -1997,6 +2021,51 @@ impl TryFrom<u32> for SvgExportFlag {
+   }
+ }
+ 
++/// A Ganesh GL direct context, built from an already-current GL context. Owns
++/// the underlying GrDirectContext; freed on Drop. Used only for the jsgame
++/// 3D-composite path (GPU-backed 2D surface so drawImage(webglCanvas) is a
++/// GPU->GPU blit). `make_gl` returns None on CPU-only Skia.
++pub struct GrContext {
++  ptr: *mut ffi::skiac_grcontext,
++}
++
++impl GrContext {
++  /// `get_proc` is a `*const c_char -> *mut c_void` GL loader (the frontend's
++  /// get_proc_address). The current thread's GL context must be current.
++  pub fn make_gl(get_proc: *mut std::ffi::c_void) -> Option<GrContext> {
++    let ptr = unsafe { ffi::skiac_grcontext_make_gl(get_proc, ptr::null_mut()) };
++    if ptr.is_null() {
++      None
++    } else {
++      Some(GrContext { ptr })
++    }
++  }
++
++  /// Re-sync Skia's cached GL state after the frontend clobbered it. Call once
++  /// at the top of each frame before drawing into a GPU surface.
++  pub fn reset(&self) {
++    unsafe { ffi::skiac_grcontext_reset(self.ptr) }
++  }
++
++  /// Flush + submit queued GPU work for `surface` (call before presenting).
++  pub fn flush(&self, surface: &Surface) {
++    unsafe { ffi::skiac_grcontext_flush(self.ptr, surface.ptr) }
++  }
++
++  /// Clear `surface` to fully transparent (for the HUD overlay surface).
++  pub fn clear_transparent(&self, surface: &Surface) {
++    unsafe { ffi::skiac_surface_gpu_clear_transparent(self.ptr, surface.ptr) }
++  }
++}
++
++impl Drop for GrContext {
++  fn drop(&mut self) {
++    if !self.ptr.is_null() {
++      unsafe { ffi::skiac_grcontext_destroy(self.ptr) }
++    }
++  }
++}
++
+ pub struct Surface {
+   ptr: *mut ffi::skiac_surface,
+   pub(crate) canvas: Canvas,
+@@ -2028,6 +2097,30 @@ impl Surface {
+     }
+   }
+ 
++  /// GPU-backed (Ganesh GL) surface on `gr`'s context. Returns None if Skia is
++  /// CPU-only or RenderTarget creation fails — caller falls back to CPU raster.
++  pub fn new_gpu(
++    gr: &GrContext,
++    width: u32,
++    height: u32,
++    color_space: ColorSpace,
++  ) -> Option<Surface> {
++    unsafe {
++      Self::from_ptr(ffi::skiac_surface_create_gpu(
++        gr.ptr,
++        width as i32,
++        height as i32,
++        color_space as u8,
++      ))
++    }
++  }
++
++  /// The GL texture id backing a GPU surface (0 if CPU-backed). Lets the host
++  /// present it as a GPU->GPU textured quad — no readback.
++  pub fn gpu_texture_id(&self) -> u32 {
++    unsafe { ffi::skiac_surface_gpu_texture_id(self.ptr) }
++  }
++
+   pub fn new_svg(
+     width: u32,
+     height: u32,

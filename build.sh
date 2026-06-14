@@ -1,9 +1,17 @@
 #!/usr/bin/env bash
 # Build @napi-rs/canvas as a static library for linking into jsgame-libretro.
-# Skia comes PREBUILT from upstream's own skia-<sha> release (same pin we
-# verified end-to-end) — only the Rust crate builds here. CI calls this script.
+#
+# Skia is built FROM SOURCE with the Ganesh GL backend (skia_use_gl=true) so the
+# jsgame 3D-composite path can use GPU-backed surfaces (no readback). Upstream's
+# prebuilt skia-<sha> archives are CPU-only, so we can't use them. The GPU
+# surface API + the Ganesh GN flags are added by patches/ganesh-gpu.patch.
 #
 #   PLATFORM=linux-x86_64 ./build.sh
+#
+# Skia GL dialect (skia_gl_standard) is chosen per platform: "gles" for Android
+# (real GLES3 at runtime) and "gl" for desktop GL-core (linux/macos/windows
+# RetroArch). A MISMATCH makes Ganesh emit the wrong shader dialect and every
+# shader-based Skia draw silently no-ops at runtime (clear() still works).
 set -euo pipefail
 cd "$(dirname "$0")"
 
@@ -12,14 +20,15 @@ SKIA_SHA=$(node -p "require('./versions.json').skia")
 CANVAS_VERSION=$(node -p "require('./versions.json').canvasVersion")
 PLATFORM="${PLATFORM:-linux-x86_64}"
 
-# PLATFORM -> rust triple + upstream skia asset suffix
+# PLATFORM -> rust triple + Skia GL dialect. Desktop GL-core -> "gl"; Android
+# real GLES3 -> "gles".
 case "$PLATFORM" in
-    linux-x86_64)   TRIPLE=x86_64-unknown-linux-gnu;  SUFFIX=linux-x64-gnu;    EXT=a ;;
-    linux-aarch64)  TRIPLE=aarch64-unknown-linux-gnu; SUFFIX=linux-aarch64-gnu; EXT=a ;;
-    android-aarch64) TRIPLE=aarch64-linux-android;    SUFFIX=android-aarch64;  EXT=a ;;
-    macos-x86_64)   TRIPLE=x86_64-apple-darwin;       SUFFIX=darwin-x64;       EXT=a ;;
-    macos-aarch64)  TRIPLE=aarch64-apple-darwin;      SUFFIX=darwin-aarch64;   EXT=a ;;
-    windows-x86_64) TRIPLE=x86_64-pc-windows-msvc;    SUFFIX=win32-x64-msvc;   EXT=lib ;;
+    linux-x86_64)    TRIPLE=x86_64-unknown-linux-gnu;  EXT=a;   GL_STD=gl ;;
+    linux-aarch64)   TRIPLE=aarch64-unknown-linux-gnu; EXT=a;   GL_STD=gl ;;
+    android-aarch64) TRIPLE=aarch64-linux-android;     EXT=a;   GL_STD=gles ;;
+    macos-x86_64)    TRIPLE=x86_64-apple-darwin;       EXT=a;   GL_STD=gl ;;
+    macos-aarch64)   TRIPLE=aarch64-apple-darwin;      EXT=a;   GL_STD=gl ;;
+    windows-x86_64)  TRIPLE=x86_64-pc-windows-msvc;    EXT=lib; GL_STD=gl ;;
     *) echo "unknown PLATFORM=$PLATFORM"; exit 2 ;;
 esac
 
@@ -28,46 +37,77 @@ if [ ! -d "$SRC/.git" ]; then
     git clone https://github.com/Brooooooklyn/canvas.git "$SRC"
 fi
 git -C "$SRC" checkout -q "$CANVAS_SHA"
-# skia headers (for skia-c compile) — sparse source checkout, no deps sync
+
+# Full Skia source checkout (needed to BUILD, not just headers).
 if [ ! -e "$SRC/skia/.git" ]; then
-    git clone --no-checkout https://github.com/google/skia.git "$SRC/skia"
+    git clone https://github.com/google/skia.git "$SRC/skia"
 fi
-git -C "$SRC/skia" fetch -q --depth 1 origin "$SKIA_SHA" || git -C "$SRC/skia" fetch -q origin
+git -C "$SRC/skia" fetch -q origin "$SKIA_SHA" || git -C "$SRC/skia" fetch -q origin
 git -C "$SRC/skia" checkout -q "$SKIA_SHA"
 
-# staticlib patch (cdylib -> staticlib)
-git -C "$SRC" checkout -q Cargo.toml
+# ── Patches (idempotent: revert tracked files first) ─────────────────────────
+git -C "$SRC" checkout -q Cargo.toml build.rs scripts/build-skia.js skia-c/skia_c.cpp skia-c/skia_c.hpp src/sk.rs src/ctx.rs src/lib.rs 2>/dev/null || true
 patch -d "$SRC" -p1 -s < "$PWD/patches/staticlib.patch"
-# native-arm64 build.rs (upstream hardcodes a cross-sysroot Docker path)
-git -C "$SRC" checkout -q build.rs
 patch -d "$SRC" -p1 -s < "$PWD/patches/aarch64-native.patch"
+# Ganesh GPU surface API + GN flags (skia_use_gl/enable_ganesh/gl_standard).
+patch -d "$SRC" -p1 -s < "$PWD/patches/ganesh-gpu.patch"
 
-# ── Prebuilt Skia archives from upstream's release ───────────────────────
-SHORT=${SKIA_SHA:0:8}
-STATIC="$SRC/skia/out/Static"
-mkdir -p "$STATIC"
-for lib in skia skshaper svg skottie sksg skresources skparagraph skunicode_core skunicode_icu jsonreader; do
-    if [ "$EXT" = "lib" ]; then ASSET="${lib}-${SUFFIX}.lib"; LOCAL="${lib}.lib";
-    else ASSET="lib${lib}-${SUFFIX}.a"; LOCAL="lib${lib}.a"; fi
-    if [ ! -f "$STATIC/$LOCAL" ]; then
-        echo "fetching $ASSET..."
-        curl -sfL "https://github.com/Brooooooklyn/canvas/releases/download/skia-${SHORT}/${ASSET}" \
-            -o "$STATIC/$LOCAL"
-    fi
-done
-curl -sfL "https://github.com/Brooooooklyn/canvas/releases/download/skia-${SHORT}/icudtl.dat" \
-    -o "$STATIC/icudtl.dat" || true
+# ── Skia build deps (gn, ninja, depot_tools sync) ────────────────────────────
+SK="$SRC/skia"
+export PATH="$PWD/$SK/bin:$PATH"
+if [ ! -x "$SK/bin/gn" ]; then
+    python3 "$SK/bin/fetch-gn"
+fi
+command -v ninja >/dev/null || python3 "$SK/bin/fetch-ninja" || true
+# Sync third_party/externals (the part the old header-only checkout skipped).
+# Skip if already synced — git-sync-deps also runs DEPS hooks (e.g. emsdk
+# activation) we don't need for a native build, and those can fail on newer
+# python. We only need the source externals, not the WASM/emsdk toolchain.
+if [ ! -d "$SK/third_party/externals/harfbuzz" ] || \
+   [ ! -d "$SK/third_party/externals/freetype" ]; then
+    # GIT_SYNC_DEPS_SKIP_EMSDK: skip the emsdk activation hook — it's only for
+    # Skia's WASM build (we build native) and fails on newer python (3.14).
+    GIT_SYNC_DEPS_SKIP_EMSDK=1 python3 "$SK/tools/git-sync-deps"
+fi
 
-# ── Rust staticlib ───────────────────────────────────────────────────────
+# ── Build Skia from source with Ganesh (per-platform GL dialect) ─────────────
+# scripts/build-skia.js drives gn gen + ninja with the patched (Ganesh) GN args.
+# It reads CANVAS_SKIA_GL_STANDARD for the dialect and the cross target via its
+# own --target arg (android/aarch64 handling lives there).
+SKIA_TARGET_ARG=""
+case "$PLATFORM" in
+    linux-aarch64)  SKIA_TARGET_ARG="--target=aarch64-unknown-linux-gnu" ;;
+    android-aarch64) SKIA_TARGET_ARG="--target=aarch64-linux-android" ;;
+esac
+( cd "$SRC" && SKIP_SYNC_SK_DEPS=0 CANVAS_SKIA_GL_STANDARD="$GL_STD" \
+    node scripts/build-skia.js $SKIA_TARGET_ARG ) || true
+# build-skia.js may exit non-zero on the unrelated fiddle_examples link target;
+# the .a archives we need are produced regardless. Build them explicitly to be
+# sure (and to surface a REAL failure if libskia.a is missing).
+STATIC="$SK/out/Static"
+ninja -C "$STATIC" skia skshaper svg skottie sksg skresources skparagraph \
+    skunicode_core skunicode_icu jsonreader
+[ -f "$STATIC/libskia.a" ] || { echo "FATAL: libskia.a not built"; exit 1; }
+# Sanity: confirm Ganesh got compiled in (GPU backend symbols present). The
+# names are C++-mangled in the archive, so match the mangled substrings. Use
+# grep -c (not -q): under `set -o pipefail`, grep -q exits on first match and
+# SIGPIPEs the large nm output (141), which would fail the pipeline spuriously.
+NM=nm; command -v llvm-nm >/dev/null && NM=llvm-nm
+GANESH_SYMS=$($NM "$STATIC/libskia.a" 2>/dev/null | grep -c "GrDirectContext" || true)
+[ "$GANESH_SYMS" -ge 1 ] \
+    || { echo "FATAL: Ganesh symbols missing from libskia.a (CPU-only build?)"; exit 1; }
+
+# ── Rust staticlib (CANVAS_SKIA_GANESH=1 -> SK_GANESH/SK_GL compile defines) ──
 cd "$SRC"
 rustup target add "$TRIPLE" 2>/dev/null || true
 # lto=false: fat-LTO bitcode archives are unusable downstream; strip=none
 # keeps napi_register_module_v1. Env vars outrank the manifest profile.
+CANVAS_SKIA_GANESH=1 \
 CARGO_PROFILE_RELEASE_LTO=false \
 CARGO_PROFILE_RELEASE_STRIP=none \
 cargo build --release --target "$TRIPLE"
 
-# ── Package ──────────────────────────────────────────────────────────────
+# ── Package ──────────────────────────────────────────────────────────────────
 cd ../..
 OUT="out/$PLATFORM"
 rm -rf "$OUT"
@@ -77,16 +117,25 @@ if [ "$EXT" = "lib" ]; then
 else
     cp "$SRC/target/$TRIPLE/release/libcanvas.a" "$OUT/"
 fi
-find "$STATIC" -maxdepth 1 -type f | xargs -I{} cp {} "$OUT/skia/"
+# Ship the Ganesh-built Skia archives (rename libfoo.a -> the names downstream
+# CMake expects, matching the old prebuilt layout).
+for f in "$STATIC"/*.a; do
+    [ -f "$f" ] || continue
+    cp "$f" "$OUT/skia/$(basename "$f")"
+done
+cp "$STATIC/icudtl.dat" "$OUT/skia/" 2>/dev/null || true
 cp "$SRC/skia-c/skia_c.hpp" "$OUT/include/"
 cp "$SRC/index.js" "$SRC/geometry.js" "$SRC/load-image.js" "$OUT/js/"
 printf "module.exports = process._linkedBinding('canvas');\n" > "$OUT/js/js-binding.js"
 echo "$CANVAS_VERSION" > "$OUT/CANVAS_VERSION"
+echo "$GL_STD" > "$OUT/SKIA_GL_STANDARD"
 
 if [ "$EXT" = "a" ]; then
-    NM=nm; command -v llvm-nm >/dev/null && NM=llvm-nm
     SYMS=$($NM "$OUT"/libcanvas.a 2>/dev/null | grep -c 'T _\?napi_register_module_v1' || true)
     [ "$SYMS" -ge 1 ] || { echo "FATAL: napi_register_module_v1 missing"; exit 1; }
+    # Confirm the GPU surface API made it in (Ganesh build, not the CPU stub).
+    GPU_SYMS=$($NM "$OUT"/libcanvas.a 2>/dev/null | grep -c 'T _\?skiac_grcontext_make_gl' || true)
+    [ "$GPU_SYMS" -ge 1 ] || { echo "FATAL: GPU surface API missing (Ganesh build?)"; exit 1; }
 fi
 
 tar czf "out/libcanvas-$PLATFORM.tar.gz" -C "$OUT" .
