@@ -103,15 +103,18 @@ esac
 STATIC="$SK/out/Static"
 ninja -C "$STATIC" skia skshaper svg skottie sksg skresources skparagraph \
     skunicode_core skunicode_icu jsonreader
-[ -f "$STATIC/libskia.a" ] || { echo "FATAL: libskia.a not built"; exit 1; }
+# Skia's main archive is libskia.a (Unix) or skia.lib (Windows/MSVC).
+if [ "$EXT" = "lib" ]; then SKIA_LIB="$STATIC/skia.lib"; else SKIA_LIB="$STATIC/libskia.a"; fi
+[ -f "$SKIA_LIB" ] || { echo "FATAL: $(basename "$SKIA_LIB") not built"; exit 1; }
 # Sanity: confirm Ganesh got compiled in (GPU backend symbols present). The
 # names are C++-mangled in the archive, so match the mangled substrings. Use
 # grep -c (not -q): under `set -o pipefail`, grep -q exits on first match and
 # SIGPIPEs the large nm output (141), which would fail the pipeline spuriously.
+# llvm-nm reads both ELF .a and COFF .lib; fall back to nm on Unix.
 NM=nm; command -v llvm-nm >/dev/null && NM=llvm-nm
-GANESH_SYMS=$($NM "$STATIC/libskia.a" 2>/dev/null | grep -c "GrDirectContext" || true)
+GANESH_SYMS=$($NM "$SKIA_LIB" 2>/dev/null | grep -c "GrDirectContext" || true)
 [ "$GANESH_SYMS" -ge 1 ] \
-    || { echo "FATAL: Ganesh symbols missing from libskia.a (CPU-only build?)"; exit 1; }
+    || { echo "FATAL: Ganesh symbols missing from $(basename "$SKIA_LIB") (CPU-only build?)"; exit 1; }
 
 # ── Rust staticlib (CANVAS_SKIA_GANESH=1 -> SK_GANESH/SK_GL compile defines) ──
 cd "$SRC"
@@ -133,9 +136,9 @@ if [ "$EXT" = "lib" ]; then
 else
     cp "$SRC/target/$TRIPLE/release/libcanvas.a" "$OUT/"
 fi
-# Ship the Ganesh-built Skia archives (rename libfoo.a -> the names downstream
-# CMake expects, matching the old prebuilt layout).
-for f in "$STATIC"/*.a; do
+# Ship the Ganesh-built Skia archives (.a on Unix, .lib on Windows), matching
+# the layout downstream CMake globs.
+for f in "$STATIC"/*."$EXT"; do
     [ -f "$f" ] || continue
     cp "$f" "$OUT/skia/$(basename "$f")"
 done
