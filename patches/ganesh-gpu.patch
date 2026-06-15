@@ -19,7 +19,7 @@ index 09a2c3c..40c0551 100644
      let nkd_home = env::var("ANDROID_NDK_LATEST_HOME").unwrap();
      let host = if cfg!(target_os = "windows") {
 diff --git a/scripts/build-skia.js b/scripts/build-skia.js
-index 9ceeed3..5800a4f 100644
+index 9ceeed3..f9ef135 100644
 --- a/scripts/build-skia.js
 +++ b/scripts/build-skia.js
 @@ -80,7 +80,11 @@ const GN_ARGS = [
@@ -35,17 +35,21 @@ index 9ceeed3..5800a4f 100644
    `skia_enable_pdf=true`,
    `skia_enable_skottie=true`,
    `skia_enable_skshaper=true`,
-@@ -91,7 +95,12 @@ const GN_ARGS = [
+@@ -91,7 +95,16 @@ const GN_ARGS = [
    `skia_pdf_subset_harfbuzz=${PDF_HARFBUZZ_SUBSET_ENABLED}`,
    `skia_use_expat=true`,
    `skia_use_system_expat=false`,
 -  `skia_use_gl=false`,
 +  `skia_use_gl=true`,
 +  `skia_use_webgl=false`,
-+  // GL dialect: "gles" for Android (real GLES3) — the SHIP target. For the LOCAL
-+  // desktop-GL-core flatpak test box, set CANVAS_SKIA_GL_STANDARD=gl so Ganesh
-+  // emits desktop-GL shaders (else shader-based draws silently no-op on desktop).
-+  `skia_gl_standard="${process.env.CANVAS_SKIA_GL_STANDARD || 'gles'}"`,
++  // GL dialect: "gles" for Android (real GLES3) — the SHIP target. For a
++  // desktop GL-core context (linux/macos RetroArch) set CANVAS_SKIA_GL_STANDARD=gl
++  // so Ganesh emits desktop-GL shaders (else shader draws silently no-op on
++  // desktop). Windows uses ANGLE and does NOT declare skia_gl_standard as a GN
++  // arg ("Undefined identifier"), so omit it there — added below per-platform.
++  ...(PLATFORM_NAME === 'win32'
++    ? []
++    : [`skia_gl_standard="${process.env.CANVAS_SKIA_GL_STANDARD || 'gles'}"`]),
    `skia_use_harfbuzz=true`,
    `skia_use_icu=true`,
    // the libavif would conflict with the Rust libavif, use the Rust library to handle avif images

@@ -55,10 +55,12 @@ patch -d "$SRC" -p1 -s < "$PWD/patches/ganesh-gpu.patch"
 # ── Skia build deps (gn, ninja, depot_tools sync) ────────────────────────────
 SK="$SRC/skia"
 export PATH="$PWD/$SK/bin:$PATH"
-if [ ! -x "$SK/bin/gn" ]; then
-    python3 "$SK/bin/fetch-gn"
+# Windows GHA bash has `python`, not `python3`; macOS/Linux have `python3`.
+PY=python3; command -v python3 >/dev/null || PY=python
+if [ ! -x "$SK/bin/gn" ] && [ ! -x "$SK/bin/gn.exe" ]; then
+    "$PY" "$SK/bin/fetch-gn"
 fi
-command -v ninja >/dev/null || python3 "$SK/bin/fetch-ninja" || true
+command -v ninja >/dev/null || "$PY" "$SK/bin/fetch-ninja" || true
 # Sync third_party/externals (the part the old header-only checkout skipped).
 # Skip if already synced — git-sync-deps also runs DEPS hooks (e.g. emsdk
 # activation) we don't need for a native build, and those can fail on newer
@@ -67,7 +69,7 @@ if [ ! -d "$SK/third_party/externals/harfbuzz" ] || \
    [ ! -d "$SK/third_party/externals/freetype" ]; then
     # GIT_SYNC_DEPS_SKIP_EMSDK: skip the emsdk activation hook — it's only for
     # Skia's WASM build (we build native) and fails on newer python (3.14).
-    GIT_SYNC_DEPS_SKIP_EMSDK=1 python3 "$SK/tools/git-sync-deps"
+    GIT_SYNC_DEPS_SKIP_EMSDK=1 "$PY" "$SK/tools/git-sync-deps"
 fi
 
 # ── Build Skia from source with Ganesh (per-platform GL dialect) ─────────────

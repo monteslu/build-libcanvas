@@ -69,6 +69,14 @@ jobs:
           chmod +x llvm.sh
           sudo ./llvm.sh 19
           sudo apt-get install -y libc++-19-dev libc++abi-19-dev
+          # The Skia source build (scripts/build-skia.js) compiles with the
+          # LITERAL `clang`/`clang++` (its GN cc/cxx args), feeding them the
+          # llvm-19 libc++ headers — so bare `clang` MUST resolve to clang-19
+          # (the runner's default clang is older and can't parse those headers:
+          # "remove_reference not implemented" / sk_abort_no_print undeclared).
+          # Point the unversioned names at 19 for both the Skia and Rust builds.
+          sudo update-alternatives --install /usr/bin/clang clang /usr/bin/clang-19 100
+          sudo update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-19 100
           # canvas build.rs feeds clang the llvm-19 libc++ headers; the compiler
           # MUST be clang-19 too (default clang is older and can't parse them).
           # Android sets its own NDK CC/CXX afterward, overriding these.
