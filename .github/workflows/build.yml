@@ -41,7 +41,11 @@ jobs:
           case "$RUNNER_OS" in
             Linux)   sudo apt-get update && sudo apt-get install -y nasm ;;
             macOS)   brew list nasm >/dev/null 2>&1 || brew install nasm ;;
-            Windows) choco install nasm -y && echo "C:\\Program Files\\NASM" >> "$GITHUB_PATH" ;;
+            # libaom's probe REJECTS nasm 3.x (choco's latest); it needs nasm
+            # 2.x. Pin 2.16.01 — else aom_optimization.cmake fails ("Configuring
+            # incomplete"). --force in case a 3.x got cached on the image.
+            Windows) choco install nasm --version=2.16.01 -y --force \
+                       && echo "C:\\Program Files\\NASM" >> "$GITHUB_PATH" ;;
           esac
           nasm --version || true
 
