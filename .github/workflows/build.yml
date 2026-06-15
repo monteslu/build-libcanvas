@@ -40,10 +40,18 @@ jobs:
         run: |
           case "$RUNNER_OS" in
             Linux)   sudo apt-get update && sudo apt-get install -y nasm ;;
-            macOS)   brew list nasm >/dev/null 2>&1 || brew install nasm ;;
-            # libaom's probe REJECTS nasm 3.x (choco's latest); it needs nasm
-            # 2.x. Pin 2.16.01 — else aom_optimization.cmake fails ("Configuring
-            # incomplete"). --force in case a 3.x got cached on the image.
+            # libaom's probe REJECTS nasm 3.x; it needs nasm 2.x (else
+            # aom_optimization.cmake fails: "Unsupported nasm: multipass
+            # optimization not supported"). brew now ships nasm 3.x, so DON'T
+            # use brew here — build 2.16.01 from source (native arm64, no
+            # Rosetta) and put it ahead of brew's on PATH.
+            macOS)   NASM_VER=2.16.01
+                     curl -fsSL "https://www.nasm.us/pub/nasm/releasebuilds/${NASM_VER}/nasm-${NASM_VER}.tar.gz" \
+                       | tar xz -C "$RUNNER_TEMP"
+                     ( cd "$RUNNER_TEMP/nasm-${NASM_VER}" && ./configure --prefix="$RUNNER_TEMP/nasm" && make -j3 && make install )
+                     echo "$RUNNER_TEMP/nasm/bin" >> "$GITHUB_PATH" ;;
+            # Windows: same nasm-2.x requirement; choco can pin the version.
+            # --force in case a 3.x got cached on the image.
             Windows) choco install nasm --version=2.16.01 -y --force \
                        && echo "C:\\Program Files\\NASM" >> "$GITHUB_PATH" ;;
           esac
