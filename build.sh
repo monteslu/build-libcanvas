@@ -69,7 +69,18 @@ if [ ! -d "$SK/third_party/externals/harfbuzz" ] || \
    [ ! -d "$SK/third_party/externals/freetype" ]; then
     # GIT_SYNC_DEPS_SKIP_EMSDK: skip the emsdk activation hook — it's only for
     # Skia's WASM build (we build native) and fails on newer python (3.14).
-    GIT_SYNC_DEPS_SKIP_EMSDK=1 "$PY" "$SK/tools/git-sync-deps"
+    # Retry: git-sync-deps fetches ~40 repos from googlesource and gives up on
+    # the first DNS/network hiccup (seen flaking on CI runners), so retry a few
+    # times — re-runs are cheap (already-synced repos are skipped).
+    synced=0
+    for attempt in 1 2 3 4 5; do
+        if GIT_SYNC_DEPS_SKIP_EMSDK=1 "$PY" "$SK/tools/git-sync-deps"; then
+            synced=1; break
+        fi
+        echo "git-sync-deps attempt $attempt failed; retrying in 15s..."
+        sleep 15
+    done
+    [ "$synced" = 1 ] || { echo "FATAL: git-sync-deps failed after retries"; exit 1; }
 fi
 
 # ── Build Skia from source with Ganesh (per-platform GL dialect) ─────────────

@@ -74,9 +74,12 @@ jobs:
           # llvm-19 libc++ headers — so bare `clang` MUST resolve to clang-19
           # (the runner's default clang is older and can't parse those headers:
           # "remove_reference not implemented" / sk_abort_no_print undeclared).
-          # Point the unversioned names at 19 for both the Skia and Rust builds.
-          sudo update-alternatives --install /usr/bin/clang clang /usr/bin/clang-19 100
-          sudo update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-19 100
+          # Force-symlink the unversioned names to 19 in /usr/local/bin (ahead of
+          # /usr/bin on PATH). update-alternatives alone didn't win on the runner.
+          sudo ln -sf "$(command -v clang-19)"   /usr/local/bin/clang
+          sudo ln -sf "$(command -v clang++-19)" /usr/local/bin/clang++
+          hash -r
+          echo "clang resolves to: $(command -v clang) -> $(clang --version | head -1)"
           # canvas build.rs feeds clang the llvm-19 libc++ headers; the compiler
           # MUST be clang-19 too (default clang is older and can't parse them).
           # Android sets its own NDK CC/CXX afterward, overriding these.
