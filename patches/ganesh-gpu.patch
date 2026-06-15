@@ -19,7 +19,7 @@ index 09a2c3c..40c0551 100644
      let nkd_home = env::var("ANDROID_NDK_LATEST_HOME").unwrap();
      let host = if cfg!(target_os = "windows") {
 diff --git a/scripts/build-skia.js b/scripts/build-skia.js
-index 9ceeed3..f9ef135 100644
+index 9ceeed3..bc9263f 100644
 --- a/scripts/build-skia.js
 +++ b/scripts/build-skia.js
 @@ -80,7 +80,11 @@ const GN_ARGS = [
@@ -53,6 +53,22 @@ index 9ceeed3..f9ef135 100644
    `skia_use_harfbuzz=true`,
    `skia_use_icu=true`,
    // the libavif would conflict with the Rust libavif, use the Rust library to handle avif images
+@@ -163,7 +176,14 @@ switch (PLATFORM_NAME) {
+       '"-DSK_ENCODE_JPEG",' +
+       '"-DSK_CODEC_DECODES_JPEG",' +
+       '"-DSK_SHAPER_HARFBUZZ_AVAILABLE"'
+-    if (PLATFORM_NAME === 'linux' && !TARGET_TRIPLE && HOST_ARCH === 'x64') {
++    // Build Skia's C++ with LLVM libc++ on BOTH native linux arches (x64 + arm64).
++    // The skia_c.cpp glue (build.rs / aarch64-native.patch) compiles against
++    // /usr/lib/llvm-19/include/c++/v1 (libc++); if libskia.a is built with the
++    // default GNU libstdc++ instead, C++ objects passed across the boundary
++    // (SkString / TArray / std::vector in get_line_metrics_or_draw_text) have
++    // mismatched ABI -> stack corruption. This was x64-only before, which is why
++    // aarch64 segfaulted in text shaping while x86_64 was fine.
++    if (PLATFORM_NAME === 'linux' && !TARGET_TRIPLE && (HOST_ARCH === 'x64' || HOST_ARCH === 'arm64')) {
+       if (HOST_LIBC === 'glibc') {
+         ExtraCflagsCC += ',"-stdlib=libc++","-static","-I/usr/lib/llvm-19/include/c++/v1"'
+       } else {
 diff --git a/skia-c/skia_c.cpp b/skia-c/skia_c.cpp
 index bfaa2d6..808de8c 100644
 --- a/skia-c/skia_c.cpp
