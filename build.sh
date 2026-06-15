@@ -87,9 +87,12 @@ fi
 # scripts/build-skia.js drives gn gen + ninja with the patched (Ganesh) GN args.
 # It reads CANVAS_SKIA_GL_STANDARD for the dialect and the cross target via its
 # own --target arg (android/aarch64 handling lives there).
+# Only pass a cross --target when actually cross-compiling. linux-aarch64 runs on
+# a NATIVE arm64 runner (ubuntu-22.04-arm), so passing the cross target makes
+# build-skia.js use a cross-sysroot path that doesn't exist (sys/types.h not
+# found). Android is a genuine cross-compile (NDK).
 SKIA_TARGET_ARG=""
 case "$PLATFORM" in
-    linux-aarch64)  SKIA_TARGET_ARG="--target=aarch64-unknown-linux-gnu" ;;
     android-aarch64) SKIA_TARGET_ARG="--target=aarch64-linux-android" ;;
 esac
 ( cd "$SRC" && SKIP_SYNC_SK_DEPS=0 CANVAS_SKIA_GL_STANDARD="$GL_STD" \
