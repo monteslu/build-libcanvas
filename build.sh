@@ -90,10 +90,15 @@ fi
 # Only pass a cross --target when actually cross-compiling. linux-aarch64 runs on
 # a NATIVE arm64 runner (ubuntu-22.04-arm), so passing the cross target makes
 # build-skia.js use a cross-sysroot path that doesn't exist (sys/types.h not
-# found). Android is a genuine cross-compile (NDK).
+# found). Android is a genuine cross-compile (NDK). macos-x86_64 is now a
+# CROSS build too: GitHub retired the free Intel macos-13 runner, so we build
+# it on the arm64 macos-14 image and pass the x86_64 target — build-skia.js has
+# an explicit HOST_ARCH==arm64 path (target_cpu="x64") and Apple's toolchain
+# cross-compiles natively. The cargo side cross-builds via `rustup target add`.
 SKIA_TARGET_ARG=""
 case "$PLATFORM" in
     android-aarch64) SKIA_TARGET_ARG="--target=aarch64-linux-android" ;;
+    macos-x86_64)    SKIA_TARGET_ARG="--target=x86_64-apple-darwin" ;;
 esac
 ( cd "$SRC" && SKIP_SYNC_SK_DEPS=0 CANVAS_SKIA_GL_STANDARD="$GL_STD" \
     node scripts/build-skia.js $SKIA_TARGET_ARG ) || true
