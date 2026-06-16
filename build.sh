@@ -124,11 +124,21 @@ GANESH_SYMS=$($NM "$SKIA_LIB" 2>/dev/null | grep -c "GrDirectContext" || true)
 # ── Rust staticlib (CANVAS_SKIA_GANESH=1 -> SK_GANESH/SK_GL compile defines) ──
 cd "$SRC"
 rustup target add "$TRIPLE" 2>/dev/null || true
+# On Windows, Rust defaults to the DYNAMIC CRT (/MD). The Skia + C/C++ bulk of
+# libcanvas is /MT (static), and the consumer (jsgame) links /MT — so the one
+# Rust staticlib object (…-static.o) was the lone /MD member, causing a hard
+# LNK2038/LNK1319 CRT mismatch at the consumer link. Force the static CRT for
+# the Rust side so the whole .lib is uniformly /MT.
+RUST_CRT_FLAG=""
+case "$PLATFORM" in
+    windows-x86_64) RUST_CRT_FLAG="-C target-feature=+crt-static" ;;
+esac
 # lto=false: fat-LTO bitcode archives are unusable downstream; strip=none
 # keeps napi_register_module_v1. Env vars outrank the manifest profile.
 CANVAS_SKIA_GANESH=1 \
 CARGO_PROFILE_RELEASE_LTO=false \
 CARGO_PROFILE_RELEASE_STRIP=none \
+RUSTFLAGS="${RUSTFLAGS:-} $RUST_CRT_FLAG" \
 cargo build --release --target "$TRIPLE"
 
 # ── Package ──────────────────────────────────────────────────────────────────
